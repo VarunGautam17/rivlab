@@ -51,4 +51,30 @@ The system follows a multi-stage geometric pipeline:
 ---
 
 ## 📂 Repository Structure
+smart-river-labeling/
+│
+├── final.py
+├── Problem 1 - river.wkt
+├── requirements.txt
+└── README.md
+
+
+---
+
+##⚙️ Installation
+
+### Prerequisites
+
+- Python 3.9+
+- pip package manager
+
+### Install Dependencies
+
+```bash
+pip install -r requirements.txt
+
+OR MANUALLY
+
+pip install shapely matplotlib numpy
+
 

@@ -3,7 +3,7 @@
 HackArena 3.0 – Problem 1  
 Automatic and intelligent placement of river names inside complex river geometries.
 
-Live Demo: https://gemini.google.com/share/4b6f7bcae4ff](https://gemini.google.com/share/af3786c81e62
+Live Demo: https://gemini.google.com/share/af3786c81e62
 ---
 
 ## 📌 Overview

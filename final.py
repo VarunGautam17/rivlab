@@ -1,33 +1,18 @@
 """
-FINAL SUBMISSION VERSION
+FINAL SUBMISSION VERSION – NORMALIZED
 HackArena 3.0 – Smart River Label Placement
-
-Features:
-✔ Robust WKT Parsing
-✔ Safe-Zone Padding
-✔ Oriented Skeletonization
-✔ Width + Clearance Optimization
-✔ Rotation Along Flow
-✔ Fallback Handling
-✔ Stable on Real Data
-✔ Single-File Submission
+Handles Lat/Lon + Meter Coordinates
 """
 
 import os
-import sys
 import math
 import re
 import numpy as np
 import matplotlib.pyplot as plt
 
 from shapely import wkt
-from shapely.geometry import (
-    Polygon,
-    MultiPolygon,
-    LineString,
-    Point
-)
-from shapely.ops import unary_union
+from shapely.geometry import Polygon, MultiPolygon, LineString, Point
+from shapely.affinity import scale, translate
 
 
 # ==================================================
@@ -39,6 +24,49 @@ DEFAULT_LABEL = "ELBE"
 DEFAULT_FONT = 12
 DEFAULT_PADDING = 4.0
 
+TARGET_SIZE = 1000.0   # normalize to 1000x1000
+
+
+# ==================================================
+# NORMALIZER
+# ==================================================
+
+class GeometryNormalizer:
+
+    def __init__(self, geom):
+
+        minx, miny, maxx, maxy = geom.bounds
+
+        self.minx = minx
+        self.miny = miny
+
+        width = maxx - minx
+        height = maxy - miny
+
+        self.scale_factor = TARGET_SIZE / max(width, height)
+
+
+    def normalize(self, geom):
+
+        g = translate(geom, xoff=-self.minx, yoff=-self.miny)
+
+        g = scale(
+            g,
+            xfact=self.scale_factor,
+            yfact=self.scale_factor,
+            origin=(0, 0)
+        )
+
+        return g
+
+
+    def denormalize_point(self, x, y):
+
+        x = x / self.scale_factor + self.minx
+        y = y / self.scale_factor + self.miny
+
+        return x, y
+
 
 # ==================================================
 # GEOMETRY ENGINE
@@ -48,63 +76,53 @@ class RiverGeometryEngine:
 
     def __init__(self, filename):
 
-        if not os.path.exists(filename):
-            raise FileNotFoundError(f"{filename} not found")
-
         self.filename = filename
-        self.polygons = self._load_wkt()
-        self.river = self._get_main_polygon()
 
+        self.original_geom = self._load_wkt()
+        self.normalizer = GeometryNormalizer(self.original_geom)
 
-    # --------------------------
-    # Robust WKT Loader
-    # --------------------------
+        self.geom = self.normalizer.normalize(self.original_geom)
+
 
     def _load_wkt(self):
 
         with open(self.filename, "r", encoding="utf-8-sig") as f:
-            text = f.read()
+            raw = f.read()
 
-        text = text.replace("\ufeff", "").strip()
+        raw = raw.replace("\ufeff", "").strip()
 
-        parts = re.split(r"\s*POLYGON", text)
-        parts = [p.strip() for p in parts if p.strip()]
+        blocks = re.split(r"\s*POLYGON", raw)
 
-        polygons = []
+        polys = []
 
-        for part in parts:
+        for b in blocks:
+
+            if not b.strip():
+                continue
 
             try:
-                if not part.startswith("(("):
-                    part = "((" + part
+                if not b.startswith("(("):
+                    b = "((" + b
 
-                if not part.endswith("))"):
-                    part = part.rstrip(")") + "))"
+                if not b.endswith("))"):
+                    b = b.rstrip(")") + "))"
 
-                wkt_str = "POLYGON" + part
+                s = "POLYGON" + b
 
-                poly = wkt.loads(wkt_str)
+                g = wkt.loads(s)
 
-                if not poly.is_valid:
-                    poly = poly.buffer(0)
+                if not g.is_valid:
+                    g = g.buffer(0)
 
-                polygons.append(poly)
+                polys.append(g)
 
             except:
                 continue
 
-        if not polygons:
-            raise ValueError("No valid polygons in WKT file")
+        if not polys:
+            raise ValueError("Invalid WKT geometry")
 
-        return polygons
-
-
-    def _get_main_polygon(self):
-
-        if len(self.polygons) == 1:
-            return self.polygons[0]
-
-        return max(self.polygons, key=lambda p: p.area)
+        return max(polys, key=lambda p: p.area)
 
 
 
@@ -114,262 +132,197 @@ class RiverGeometryEngine:
 
 class RiverLabelEngine:
 
-    def __init__(self, river_poly, font_size=12, padding=3):
+    def __init__(self, river, font, padding):
 
-        self.river = river_poly
-        self.font = float(font_size)
-        self.padding = float(padding)
+        self.river = river
+        self.font = font
+        self.padding = padding
 
-        self.safe_zone = self._create_safe_zone()
+        self.safe = self._safe_zone()
 
 
-    # --------------------------
-    # Padding Zone
-    # --------------------------
+    def _safe_zone(self):
 
-    def _create_safe_zone(self):
+        buf = self.river.buffer(-self.padding)
 
-        safe = self.river.buffer(-self.padding)
-
-        if safe.is_empty:
-
-            print("⚠ Padding too large. Using original geometry.")
+        if buf.is_empty:
             return self.river
 
-        if isinstance(safe, MultiPolygon):
-            return max(safe.geoms, key=lambda g: g.area)
+        if isinstance(buf, MultiPolygon):
+            return max(buf.geoms, key=lambda g: g.area)
 
-        return safe
+        return buf
 
 
-    # --------------------------
-    # Oriented Skeleton
-    # --------------------------
+    def _centerline(self, scans=250):
 
-    def _extract_centerline(self, scans=200):
-
-        poly = self.safe_zone
+        poly = self.safe
 
         rect = poly.minimum_rotated_rectangle
-        coords = np.array(rect.exterior.coords)
+        pts = np.array(rect.exterior.coords)
 
-        edges = np.linalg.norm(coords[1:] - coords[:-1], axis=1)
-        idx = np.argmax(edges)
+        edges = np.linalg.norm(pts[1:] - pts[:-1], axis=1)
 
-        main_vec = coords[idx+1] - coords[idx]
-        main_len = np.linalg.norm(main_vec)
+        i = np.argmax(edges)
 
-        if main_len == 0:
-            return None
+        main = pts[i+1] - pts[i]
+        main = main / np.linalg.norm(main)
 
-        main_dir = main_vec / main_len
-        perp = np.array([-main_dir[1], main_dir[0]])
+        perp = np.array([-main[1], main[0]])
 
         origin = np.array(rect.centroid.coords[0])
-        proj0 = np.dot(origin, main_dir)
 
-        pts = np.array(poly.exterior.coords)
-        proj = np.dot(pts, main_dir)
+        proj = np.dot(np.array(poly.exterior.coords), main)
 
         pmin, pmax = proj.min(), proj.max()
 
-        scan_pos = np.linspace(pmin, pmax, scans)
+        scan = np.linspace(pmin, pmax, scans)
 
-        scan_len = max(self.river.bounds) * 5
+        L = max(poly.bounds) * 3
 
-        centers = []
+        mids = []
 
-        for s in scan_pos:
+        for s in scan:
 
-            base = origin + (s - proj0) * main_dir
+            base = origin + (s - np.dot(origin, main)) * main
 
-            p1 = base - perp * scan_len
-            p2 = base + perp * scan_len
+            a = base - perp * L
+            b = base + perp * L
 
-            scan = LineString([p1, p2])
+            line = LineString([a, b])
 
-            inter = poly.intersection(scan)
+            inter = poly.intersection(line)
 
             if inter.is_empty:
                 continue
 
             if inter.geom_type == "LineString":
-
-                centers.append(
-                    inter.interpolate(0.5, normalized=True)
-                )
+                mids.append(inter.interpolate(0.5, True))
 
             elif inter.geom_type == "MultiLineString":
 
                 seg = max(inter.geoms, key=lambda g: g.length)
+                mids.append(seg.interpolate(0.5, True))
 
-                centers.append(
-                    seg.interpolate(0.5, normalized=True)
-                )
-
-        if len(centers) < 5:
+        if len(mids) < 10:
             return None
 
-        return LineString(centers)
+        return LineString(mids)
 
 
-    # --------------------------
-    # Placement Optimization
-    # --------------------------
+    def find(self, text):
 
-    def find_best_position(self, text):
+        spine = self._centerline()
 
-        centerline = self._extract_centerline()
-
-        if centerline is None:
+        if spine is None:
             return None, None, None
 
 
-        coords = np.array(centerline.coords)
-
-        dists = [0]
-
-        for i in range(1, len(coords)):
-            d = np.linalg.norm(coords[i] - coords[i-1])
-            dists.append(dists[-1] + d)
-
-        total_len = dists[-1]
-
-
-        char_w = self.font * 0.6
-        text_len = len(text) * char_w
-
+        pts = np.array(spine.coords)
 
         best = None
         best_score = -1
 
 
-        for i in range(len(coords)):
+        for i, p in enumerate(pts):
 
-            pos = coords[i]
+            point = Point(p)
 
-            point = Point(pos)
+            if not self.safe.contains(point):
+                continue
 
-            if not self.safe_zone.contains(point):
+            clear = point.distance(self.river.boundary)
+
+            if clear < self.font:
                 continue
 
 
-            clearance = point.distance(self.river.boundary)
+            straight = self._straight(pts, i)
 
-            if clearance < self.font:
-                continue
-
-
-            straight = self._straightness(coords, i)
-
-            central = 1.0 / (1.0 + point.distance(self.river.centroid))
-
-
-            score = (
-                clearance * 0.5 +
-                straight * 0.3 +
-                central * 0.2
-            )
+            score = clear * 0.7 + straight * 0.3
 
             if score > best_score:
-
                 best_score = score
-                best = pos
+                best = p
 
 
         if best is None:
             return None, None, None
 
 
-        angle = self._flow_angle(coords, best)
+        ang = self._angle(pts, best)
+
+        return best[0], best[1], ang
 
 
-        return best[0], best[1], angle
+    def _straight(self, pts, i, w=6):
 
+        a = max(0, i-w)
+        b = min(len(pts), i+w)
 
-    # --------------------------
-    # Helpers
-    # --------------------------
-
-    def _straightness(self, pts, i, win=6):
-
-        start = max(0, i-win)
-        end = min(len(pts), i+win)
-
-        seg = pts[start:end]
+        seg = pts[a:b]
 
         if len(seg) < 3:
             return 0.5
 
-        x = seg[:, 0]
-        y = seg[:, 1]
-
-        return 1.0 / (1.0 + np.var(x) + np.var(y))
+        return 1.0 / (1 + np.var(seg[:,0]) + np.var(seg[:,1]))
 
 
-    def _flow_angle(self, pts, pos, radius=5):
+    def _angle(self, pts, p):
 
-        dists = np.linalg.norm(pts - pos, axis=1)
+        d = np.linalg.norm(pts - p, axis=1)
 
-        mask = dists < radius * self.font
+        near = pts[d < self.font*4]
 
-        nearby = pts[mask]
-
-        if len(nearby) < 2:
+        if len(near) < 2:
             return 0
 
+        dx = near[-1,0] - near[0,0]
+        dy = near[-1,1] - near[0,1]
 
-        dx = nearby[-1,0] - nearby[0,0]
-        dy = nearby[-1,1] - nearby[0,1]
+        a = math.degrees(math.atan2(dy, dx))
 
-        ang = math.degrees(math.atan2(dy, dx))
+        if a > 90: a -= 180
+        if a < -90: a += 180
 
-        if ang > 90:
-            ang -= 180
-        if ang < -90:
-            ang += 180
-
-        return ang
+        return a
 
 
 
 # ==================================================
-# VISUALIZATION
+# VISUAL
 # ==================================================
 
-def visualize(river, pos, angle, text, font):
+def plot(orig, x, y, angle, text, font):
 
-    fig, ax = plt.subplots(figsize=(12, 14))
+    fig, ax = plt.subplots(figsize=(12,14))
 
-    if isinstance(river, MultiPolygon):
+    if isinstance(orig, MultiPolygon):
 
-        for g in river.geoms:
-            x,y = g.exterior.xy
-            ax.fill(x,y, color="#7EC8E3", alpha=0.8)
+        for g in orig.geoms:
+            X,Y = g.exterior.xy
+            ax.fill(X,Y, "#7EC8E3")
 
     else:
-        x,y = river.exterior.xy
-        ax.fill(x,y, color="#7EC8E3", alpha=0.8)
+        X,Y = orig.exterior.xy
+        ax.fill(X,Y, "#7EC8E3")
 
 
     ax.text(
-        pos[0], pos[1],
-        text,
-        fontsize=font * 1.4,
-        fontweight="bold",
+        x, y, text,
+        fontsize=font*1.4,
+        rotation=angle,
         ha="center",
         va="center",
-        rotation=angle,
-        color="darkred",
-        zorder=10
+        weight="bold",
+        color="darkred"
     )
 
 
     ax.set_aspect("equal")
-    ax.set_title("Smart River Label Placement", fontsize=18)
+    ax.set_title("Smart River Label Placement")
     ax.axis("off")
 
-    plt.tight_layout()
     plt.show()
 
 
@@ -380,62 +333,47 @@ def visualize(river, pos, angle, text, font):
 
 def main():
 
-    print("\n" + "="*60)
-    print("SMART RIVER LABEL PLACEMENT – FINAL VERSION")
-    print("="*60 + "\n")
+    print("\nSMART RIVER LABEL PLACEMENT (AUTO-SCALED)\n")
 
 
-    fname = input(f"File [{DEFAULT_FILE}]: ").strip()
-    fname = fname if fname else DEFAULT_FILE
-
-    label = input(f"Label [{DEFAULT_LABEL}]: ").strip()
-    label = label if label else DEFAULT_LABEL
-
-    size = input(f"Font [{DEFAULT_FONT}]: ").strip()
-    size = float(size) if size else DEFAULT_FONT
-
-    pad = input(f"Padding [{DEFAULT_PADDING}]: ").strip()
-    pad = float(pad) if pad else DEFAULT_PADDING
+    f = input(f"File [{DEFAULT_FILE}]: ").strip() or DEFAULT_FILE
+    t = input(f"Label [{DEFAULT_LABEL}]: ").strip() or DEFAULT_LABEL
+    fs = float(input(f"Font [{DEFAULT_FONT}]: ") or DEFAULT_FONT)
+    pd = float(input(f"Padding [{DEFAULT_PADDING}]: ") or DEFAULT_PADDING)
 
 
     print("\nLoading geometry...")
 
-    engine = RiverGeometryEngine(fname)
-
-    print("✓ Geometry loaded")
+    eng = RiverGeometryEngine(f)
 
 
-    print("Optimizing placement...")
+    print("Optimizing...")
 
-    placer = RiverLabelEngine(
-        engine.river,
-        size,
-        pad
-    )
+    placer = RiverLabelEngine(eng.geom, fs, pd)
 
-
-    x,y,angle = placer.find_best_position(label)
+    x,y,a = placer.find(t)
 
 
     if x is None:
 
-        print("⚠ No valid position found. Using centroid.")
-
-        c = engine.river.centroid
-
+        c = eng.geom.centroid
         x,y = c.x, c.y
-        angle = 0
+        a = 0
 
 
-    print("\nRESULT")
-    print(f"Position : ({x:.2f}, {y:.2f})")
-    print(f"Rotation : {angle:.2f}°")
+    # Map back
+    rx, ry = eng.normalizer.denormalize_point(x, y)
 
 
-    visualize(engine.river, (x,y), angle, label, size)
+    print("\nResult:")
+    print("Position:", rx, ry)
+    print("Angle:", a)
 
 
-    print("\n✓ Done.")
+    plot(eng.original_geom, rx, ry, a, t, fs)
+
+
+    print("\nDone.")
 
 
 
